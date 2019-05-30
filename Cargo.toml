@@ -1,0 +1,9 @@
+[package]
+name = "grabcut"
+version = "0.1.0"
+authors = ["Cameron Pyne <campyne@pdx.edu>"]
+edition = "2018"
+
+[dependencies]
+image = "*"
+rkm = "0.5.0"
