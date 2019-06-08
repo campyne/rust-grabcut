@@ -7,3 +7,4 @@ edition = "2018"
 [dependencies]
 image = "*"
 rkm = "0.5.0"
+ndarray = "*"

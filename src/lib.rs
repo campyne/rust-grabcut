@@ -1,8 +1,12 @@
 extern crate image;
 extern crate rkm;
+//#[macro_use(s)]
+extern crate ndarray;
+
 
 use image::*;
 use rkm::*;
+use ndarray::Array;
 
 pub struct Rect {
     pub x: u32,
@@ -328,7 +332,7 @@ fn calc_weights(
                     (color[2] - img.get_pixel(x - 1, y - 1).data[2] as f64),
                 ]
             };
-            upper_left_weight[x as usize][y as usize] = gamma * (-beta * dot(diff, diff)).exp();
+            upper_left_weight[x as usize][y as usize] = gamma_div_sqrt2 * (-beta * dot(diff, diff)).exp();
         } else {
             upper_left_weight[x as usize][y as usize] = 0.0;
         }
@@ -352,7 +356,7 @@ fn calc_weights(
                     (color[2] - img.get_pixel(x + 1, y - 1).data[2] as f64),
                 ]
             };
-            upper_right_weight[x as usize][y as usize] = gamma * (-beta * dot(diff, diff)).exp();
+            upper_right_weight[x as usize][y as usize] = gamma_div_sqrt2 * (-beta * dot(diff, diff)).exp();
         } else {
             upper_right_weight[x as usize][y as usize] = 0.0;
         }
@@ -367,7 +371,7 @@ fn calc_weights(
 
 fn check_mask(img: &image::DynamicImage, mask: &image::GrayImage) {
     assert!(img.dimensions() == mask.dimensions());
-    for (x, y, pixel) in mask.enumerate_pixels() {
+    for (_x, _y, pixel) in mask.enumerate_pixels() {
         //pixels in the mask must be one of the correct values to indicate
         //foreground, background, probably foreground, or probably background
         assert!(pixel.data[0] == GC_BGD
@@ -380,6 +384,7 @@ fn check_mask(img: &image::DynamicImage, mask: &image::GrayImage) {
 
 fn init_mask_with_rect(mask: &mut image::GrayImage, img_size: (u32, u32), rect: Rect) {
     //TODO check rect is a subsection of the image, i.e. x,y,w,h fits within
+    assert!(mask.dimensions() == img_size);
     for (x, y, pixel) in mask.enumerate_pixels_mut() {
         //if the pixel is in the rectangle set it to probably foreground
         if x > rect.x && x < rect.x + rect.w &&//TODO better way to do this, maybe rect as a tuple of points?
@@ -399,47 +404,59 @@ fn init_gmms(
     bgd_gmm: &mut GMM,
     fgd_gmm: &mut GMM,
 ) {
-    let mut bgd_labels: Vec<usize> = Vec::new();
-    let mut fgd_labels: Vec<usize> = Vec::new();
-    let mut bgd_samples: Vec<Color> = Vec::new();
-    let mut fgd_samples: Vec<Color> = Vec::new();
+    let mut bgd_data: Vec<f64> = Vec::new();
+    let mut fgd_data: Vec<f64> = Vec::new();
 
-    //I need to figure out how to set this all up so usable with rkm::kmeans_lloyd
-    //or use a different kmeans implementation
-    //
-    //iterate through mask and add color samples from image to bgd or fgd
+    //iterate through mask and add color data from image to bgd or fgd
     //depending on value of mask pixels
     for (x, y, pixel) in mask.enumerate_pixels() {
-        let color: Color = {
-            [
-                img.get_pixel(x, y).data[0] as f64,
-                img.get_pixel(x, y).data[1] as f64,
-                img.get_pixel(x, y).data[2] as f64,
-            ]
-        };
         if pixel.data[0] == GC_BGD || pixel.data[0] == GC_PR_BGD {
-            bgd_samples.push(color);
-        } else {
-            //GC_PR_FGD || GC_FGD
-            fgd_samples.push(color);
+            bgd_data.push(img.get_pixel(x, y).data[0] as f64);
+            bgd_data.push(img.get_pixel(x, y).data[1] as f64);
+            bgd_data.push(img.get_pixel(x, y).data[2] as f64);
+        } else { //GC_PR_FGD || GC_FGD
+            fgd_data.push(img.get_pixel(x, y).data[0] as f64);
+            fgd_data.push(img.get_pixel(x, y).data[1] as f64);
+            fgd_data.push(img.get_pixel(x, y).data[2] as f64);
         }
     }
 
-    //do kmeans
-    //bgd_labels = rkm::kmeans_lloyd(&bgd_samples, COMPONENTS_COUNT);
-    //fgd_labels = rkm::kmeans_lloyd(&fgd_samples, COMPONENTS_COUNT);
+    //get raw color data into form usable by kmeans_lloyd
+    let bgd_samples = Array::from_shape_vec((bgd_data.len()/3,3), bgd_data).unwrap();
+    let fgd_samples = Array::from_shape_vec((fgd_data.len()/3,3), fgd_data).unwrap();
+
+    //do kmeans to get component labels
+    let (_bgd_means, bgd_labels) = kmeans_lloyd(&bgd_samples.view(), COMPONENTS_COUNT);
+    let (_fgd_means, fgd_labels) = kmeans_lloyd(&fgd_samples.view(), COMPONENTS_COUNT);
 
     bgd_gmm.init_learning();
     //add samples to gmm
-    for i in 0..bgd_samples.len() {
-        //bgd_gmm.add_sample(bgd_labels[i], bgd_samples[i]);
+    //need to add the ith sample and its corresponding component label 
+    for i in 0..bgd_labels.len() {
+        //TODO find out the right ndarray way to get just the data at row i
+        //bgd_samples.row(i) with something I'm missing?
+        let color:Color = {
+            [
+                bgd_samples.row(i)[0],
+                bgd_samples.row(i)[1],
+                bgd_samples.row(i)[2],
+            ]
+        };
+        bgd_gmm.add_sample(bgd_labels[i], color);
     }
     bgd_gmm.end_learning();
 
     fgd_gmm.init_learning();
     //add samples to gmm
-    for i in 0..fgd_samples.len() {
-        //fgd_gmm.add_sample(fgd_labels[i], fgd_samples[i]);
+    for i in 0..fgd_labels.len() {
+        let color:Color = {
+            [
+                fgd_samples.row(i)[0],
+                fgd_samples.row(i)[1],
+                fgd_samples.row(i)[2],
+            ]
+        };
+        fgd_gmm.add_sample(fgd_labels[i], color);
     }
     fgd_gmm.end_learning();
 }
